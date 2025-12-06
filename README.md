@@ -16,7 +16,6 @@ Instead of one-shot guessing, Vireon does:
 - **O**utcome-calibrated confidence (confidence ≈ reality)
 - **N**ull / abstain behavior when uncertainty is high
 
-Goal: **less bullshit, more honest intelligence.**
 
 ---
 
