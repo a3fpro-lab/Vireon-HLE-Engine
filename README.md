@@ -1,22 +1,4 @@
-Good. You now have a working engine plus a mini exam.
 
-Next step = give this thing a face: add a README so people know what Vireon is.
-
-⸻
-
-Step: Add README.md
-
-On your iPhone in GitHub:
-	1.	Open your repo Vireon-HLE-Engine
-	2.	Tap Add file → Create new file
-	3.	Name it: README.md
-	4.	Paste the text below
-	5.	Scroll down → Commit message: Add README
-	6.	Tap Commit changes
-
-⸻
-
-README.md (copy–paste all of this)
 
 # Vireon HLE Engine
 
