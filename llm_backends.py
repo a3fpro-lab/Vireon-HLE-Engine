@@ -1,126 +1,99 @@
-"""
-llm_backends.py
-
-Backend adapters for Vireon-HLE-Engine.
-
-All backends expose:
-
-    llm_call(system_prompt: str, user_prompt: str, temperature: float) -> str
-
-Select backend via VIREON_BACKEND env var:
-
-- VIREON_BACKEND=xai      → Grok (xAI) via OpenAI-compatible client
-- VIREON_BACKEND=openai   → OpenAI models (gpt-4.x, gpt-5.x, etc.)
-- VIREON_BACKEND=dummy    → simple stub (for tests)
-"""
-
 from __future__ import annotations
+
 import os
+from typing import Callable
 
-from vireon_hle_engine import LLMFn
+import openai
 
-try:
-    import openai  # used for both OpenAI and xAI backends
-except ImportError:
-    openai = None  # type: ignore
+from vireon_hle_engine import LLMCall
 
 
-def _xai_llm_call(system_prompt: str, user_prompt: str, temperature: float) -> str:
+def _dummy_call(system_prompt: str, user_prompt: str, temperature: float) -> str:
     """
-    Grok via xAI API (OpenAI-compatible client).
+    Dummy backend: no external API call.
 
-    Required env:
-    - XAI_API_KEY
-    Optional:
-    - XAI_MODEL (default: "grok-4")
+    Always returns a simple explanation and the letter B so that
+    VireonHLEEngine can parse a valid answer during CI.
     """
-    if openai is None:
-        raise RuntimeError("openai package not installed. pip install openai")
+    return (
+        "This is the dummy backend. "
+        "No real model was called.\n\n"
+        "Final answer: B"
+    )
 
+
+def _make_xai_call() -> LLMCall:
+    """
+    Build an LLMCall that talks to xAI's Grok endpoint using the
+    OpenAI-compatible client.
+    """
     api_key = os.getenv("XAI_API_KEY")
     if not api_key:
-        raise RuntimeError("Set XAI_API_KEY env var for xAI backend.")
-
-    model = os.getenv("XAI_MODEL", "grok-4")
+        raise RuntimeError("XAI_API_KEY is not set but VIREON_BACKEND=xai")
 
     client = openai.OpenAI(
         api_key=api_key,
         base_url="https://api.x.ai/v1",
     )
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=temperature,
-        max_tokens=4096,
-    )
-    return resp.choices[0].message.content  # type: ignore[return-value]
+    model = os.getenv("XAI_MODEL", "grok-4")
+
+    def _call(system_prompt: str, user_prompt: str, temperature: float) -> str:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=temperature,
+            max_tokens=4096,
+        )
+        return resp.choices[0].message.content or ""
+
+    return _call
 
 
-def _openai_llm_call(system_prompt: str, user_prompt: str, temperature: float) -> str:
+def _make_openai_call() -> LLMCall:
     """
-    OpenAI backend.
-
-    Required env:
-    - OPENAI_API_KEY
-    Optional:
-    - OPENAI_MODEL (default: "gpt-5.1-thinking")
+    Build an LLMCall that talks to OpenAI's chat completions API.
     """
-    if openai is None:
-        raise RuntimeError("openai package not installed. pip install openai")
-
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("Set OPENAI_API_KEY env var for OpenAI backend.")
-
-    model = os.getenv("OPENAI_MODEL", "gpt-5.1-thinking")
+        raise RuntimeError("OPENAI_API_KEY is not set but VIREON_BACKEND=openai")
 
     client = openai.OpenAI(api_key=api_key)
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=temperature,
-        max_tokens=4096,
-    )
-    return resp.choices[0].message.content  # type: ignore[return-value]
+    model = os.getenv("OPENAI_MODEL", "gpt-5.1-mini")
+
+    def _call(system_prompt: str, user_prompt: str, temperature: float) -> str:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=temperature,
+            max_tokens=4096,
+        )
+        return resp.choices[0].message.content or ""
+
+    return _call
 
 
-def _dummy_llm_call(system_prompt: str, user_prompt: str, temperature: float) -> str:
+def get_llm_call() -> LLMCall:
     """
-    Dummy backend for wiring tests (no real AI).
-    Always answers 'B'.
-    """
-    return (
-        "I will answer this exam question.\n"
-        "Given no real model is wired, I default to a dummy choice.\n"
-        "Answer: B"
-    )
+    Select the backend based on VIREON_BACKEND env var.
 
-
-def get_llm_call() -> LLMFn:
+    - VIREON_BACKEND=xai    -> Grok via xAI
+    - VIREON_BACKEND=openai -> OpenAI models
+    - VIREON_BACKEND=dummy  -> local dummy (no network)
     """
-    Select an LLM backend based on VIREON_BACKEND env var.
-
-    Supported:
-    - "xai"      → Grok via xAI
-    - "openai"   → OpenAI
-    - "dummy"    → dummy echo backend
-    """
-    backend = os.getenv("VIREON_BACKEND", "xai").lower()
+    backend = os.getenv("VIREON_BACKEND", "dummy").lower()
 
     if backend == "xai":
-        return _xai_llm_call
+        return _make_xai_call()
     elif backend == "openai":
-        return _openai_llm_call
+        return _make_openai_call()
     elif backend == "dummy":
-        return _dummy_llm_call
+        return _dummy_call
     else:
-        raise ValueError(
-            f"Unknown VIREON_BACKEND={backend}. "
-            "Use one of: xai, openai, dummy."
-        )
+        print(f"[WARN] Unknown VIREON_BACKEND={backend!r}, falling back to dummy.")
+        return _dummy_call
