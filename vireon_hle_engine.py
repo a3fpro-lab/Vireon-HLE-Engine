@@ -1,155 +1,149 @@
-# run_hle_eval.py
+from __future__ import annotations
 
-import json
-from pathlib import Path
-from typing import List, Optional
-
-from vireon_hle_engine import VireonHLEEngine, VireonConfig
-from llm_backends import get_llm_call
+from dataclasses import dataclass
+from typing import Callable, List, Optional
 
 
-# ============================================================
-# Built-in sample questions (fallback if JSONL is missing/broken)
-# ============================================================
-SAMPLE_QUESTIONS: List[dict] = [
-    {
-        "id": 1,
-        "question": "In quantum mechanics, which operator corresponds to the observable of energy?",
-        "options": [
-            "Position operator",
-            "Hamiltonian operator",
-            "Momentum operator",
-            "Angular momentum operator",
-            "Number operator",
-        ],
-        "answer": "B",
-    }
-]
+# Type of the LLM call function: (system_prompt, user_prompt, temperature) -> response text
+LLMCall = Callable[[str, str, float], str]
 
 
-# ============================================================
-# Load HLE questions (jsonl format, one JSON per line)
-# ============================================================
-def load_hle_questions(path: str) -> List[dict]:
+@dataclass
+class VireonConfig:
     """
-    Load questions from a JSONL file.
-
-    - Each line must be a valid JSON object.
-    - Invalid lines are skipped with a warning.
-    - If nothing valid is found, falls back to SAMPLE_QUESTIONS.
+    Configuration for the Vireon HLE engine.
     """
-    p = Path(path)
-    questions: List[dict] = []
 
-    if p.exists():
-        with p.open("r", encoding="utf-8") as f:
-            for lineno, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    if isinstance(obj, dict):
-                        questions.append(obj)
-                    else:
-                        print(f"[WARN] Line {lineno} is not a JSON object, skipping.")
-                except json.JSONDecodeError as e:
-                    print(f"[WARN] Invalid JSON on line {lineno}: {e}. Skipping line.")
-    else:
-        print(f"[WARN] Question file not found: {path}")
-
-    if not questions:
-        print("[INFO] No valid questions loaded from file. Using built-in SAMPLE_QUESTIONS.")
-        questions = SAMPLE_QUESTIONS.copy()
-
-    return questions
+    n_paths: int = 6
+    temperature: float = 0.6
+    n_verifications: int = 3
+    trp_lambda: float = 0.12
+    min_confidence: float = 0.60
+    mc_options: str = "ABCDE"
 
 
-# ============================================================
-# Main evaluation loop
-# ============================================================
-def main():
-    hle_path = "hle_questions.jsonl"  # optional now; we fall back if broken/missing
+@dataclass
+class VireonResult:
+    """
+    Result of answering a single question.
+    """
 
-    questions = load_hle_questions(hle_path)
+    final_answer: Optional[str]
+    confidence: float
+    reason: str
 
-    # Vireon HLE configuration – good starting defaults
-    cfg = VireonConfig(
-        n_paths=6,
-        temperature=0.6,
-        n_verifications=3,
-        trp_lambda=0.12,
-        min_confidence=0.60,
-        mc_options="ABCDE",
-    )
 
-    llm_call = get_llm_call()
-    engine = VireonHLEEngine(llm_call=llm_call, config=cfg)
+class VireonHLEEngine:
+    """
+    Simple Vireon-style engine for HLE-style multiple-choice questions.
 
-    total = correct = abstain = 0
-    confidences: List[float] = []
-    conf_correct: List[float] = []
-    conf_incorrect: List[float] = []
+    For now, this is a clean, minimal implementation:
+    - one LLM call per question
+    - extracts a single letter (A–E) or abstains
+    - assigns a basic confidence score
 
-    print(f"Loaded {len(questions)} questions. Starting Vireon HLE evaluation...\n")
+    Later you can extend this to:
+    - multiple reasoning paths
+    - verification passes
+    - TRP-based aggregation
+    """
 
-    for q in questions:
-        qtext: str = q["question"]
-        options: Optional[List[str]] = q.get("options")
-        gold: Optional[str] = q.get("answer")  # may be None if you only want preds
+    def __init__(self, llm_call: LLMCall, config: VireonConfig):
+        self.llm_call = llm_call
+        self.config = config
 
-        total += 1
-        print(f"\n=== Question {q.get('id', total)} ===")
-        print(qtext)
+    # --------------------------------------------------------
+    # Prompt building
+    # --------------------------------------------------------
+    def _build_system_prompt(self) -> str:
+        return (
+            "You are Vireon, a careful exam reasoning engine.\n"
+            "You receive hard multiple-choice questions.\n"
+            "You must think step by step, but in the final answer "
+            "you ONLY output a single letter (A, B, C, D, or E), "
+            "or the word ABSTAIN if you truly cannot decide.\n"
+        )
+
+    def _build_user_prompt(self, question: str, options: Optional[List[str]]) -> str:
         if options:
-            letters = cfg.mc_options
+            lines: List[str] = [question, "", "Options:"]
+            letters = self.config.mc_options
             for i, opt in enumerate(options):
                 if i < len(letters):
-                    print(f"  {letters[i]}. {opt}")
+                    lines.append(f"{letters[i]}. {opt}")
+            lines.append("")
+            lines.append(
+                "First, think carefully and compare the options.\n"
+                "Then on the last line, answer with ONLY the letter of the best option "
+                "(A, B, C, D, or E), or ABSTAIN if you are not confident."
+            )
+            return "\n".join(lines)
+        else:
+            return (
+                question
+                + "\n\nThink carefully, then answer concisely. "
+                "If you are not confident, answer with the single word: ABSTAIN."
+            )
 
-        result = engine.answer_question(qtext, options)
+    # --------------------------------------------------------
+    # Output parsing
+    # --------------------------------------------------------
+    def _extract_letter(self, raw: str) -> Optional[str]:
+        """
+        Extract a letter A–E or abstain from the model's raw text.
+        Returns:
+            - 'A'..'E' if a clear letter is found
+            - None if the model abstains or we can't parse a letter
+        """
+        if not raw:
+            return None
 
-        print("Vireon answer:", result.final_answer or "ABSTAIN")
-        print("Confidence:", f"{result.confidence:.4f}")
-        print("Reason:", result.reason[:500] + ("..." if len(result.reason) > 500 else ""))
+        txt = raw.strip().upper()
 
-        if result.final_answer is None:
-            abstain += 1
-            continue
+        # If it explicitly says ABSTAIN anywhere, treat as abstain
+        if "ABSTAIN" in txt:
+            return None
 
-        confidences.append(result.confidence)
+        # Look for the first A–E in the text
+        for ch in txt:
+            if ch in self.config.mc_options:
+                return ch
 
-        if gold is not None:
-            if result.final_answer == gold:
-                correct += 1
-                conf_correct.append(result.confidence)
-            else:
-                conf_incorrect.append(result.confidence)
+        return None
 
-    # =================== Summary metrics ======================
-    print("\n" + "=" * 50)
-    print("                FINAL RESULTS")
-    print("=" * 50)
-    print(f"Total questions          : {total}")
-    print(f"Answered                 : {total - abstain}")
-    print(f"Abstained                : {abstain}")
+    # --------------------------------------------------------
+    # Public API
+    # --------------------------------------------------------
+    def answer_question(self, question: str, options: Optional[List[str]]) -> VireonResult:
+        system_prompt = self._build_system_prompt()
+        user_prompt = self._build_user_prompt(question, options)
 
-    acc_overall = correct / total if total > 0 else 0.0
-    answered = total - abstain
-    acc_conditional = correct / answered if answered > 0 else 0.0
+        # Single-call baseline; future: multiple paths + verification
+        raw = self.llm_call(system_prompt, user_prompt, self.config.temperature)
 
-    print(f"Accuracy (overall)       : {acc_overall:.4f}")
-    print(f"Accuracy (when answered) : {acc_conditional:.4f}")
+        if options:
+            letter = self._extract_letter(raw)
+        else:
+            # For non-MC questions, you could later return free-form answers.
+            # For now, treat as abstain unless extended.
+            letter = None
 
-    if confidences:
-        avg_conf = sum(confidences) / len(confidences)
-        avg_conf_cor = sum(conf_correct) / len(conf_correct) if conf_correct else 0.0
-        avg_conf_inc = sum(conf_incorrect) / len(conf_incorrect) if conf_incorrect else 0.0
+        # Very simple confidence heuristic:
+        # - 0.8 if we got a letter
+        # - 0.0 otherwise
+        conf = 0.8 if letter is not None else 0.0
 
-        print(f"Avg confidence (answered): {avg_conf:.4f}")
-        print(f"Avg confidence (correct) : {avg_conf_cor:.4f}")
-        print(f"Avg confidence (wrong)   : {avg_conf_inc:.4f}")
+        if letter is None or conf < self.config.min_confidence:
+            # Abstain
+            return VireonResult(
+                final_answer=None,
+                confidence=conf,
+                reason=raw or "",
+            )
 
-
-if __name__ == "__main__":
-    main()
+        # Confident MC answer
+        return VireonResult(
+            final_answer=letter,
+            confidence=conf,
+            reason=raw or "",
+        )
