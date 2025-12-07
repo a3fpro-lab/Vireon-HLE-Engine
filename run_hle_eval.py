@@ -1,14 +1,12 @@
 # run_hle_eval.py
 
-import json
-from pathlib import Path
 from typing import List, Optional
 
 from vireon_hle_engine import VireonHLEEngine, VireonConfig
 
 
 # ============================================================
-# Built-in sample questions (fallback if JSONL is missing/broken)
+# Built-in sample questions (no JSON file needed for CI)
 # ============================================================
 SAMPLE_QUESTIONS: List[dict] = [
     {
@@ -43,50 +41,10 @@ def dummy_llm_call(system_prompt: str, user_prompt: str, temperature: float) -> 
 
 
 # ============================================================
-# Load HLE questions (jsonl format, one JSON per line)
-# ============================================================
-def load_hle_questions(path: str) -> List[dict]:
-    """
-    Load questions from a JSONL file.
-
-    - Each line must be a valid JSON object.
-    - Invalid lines are skipped with a warning.
-    - If nothing valid is found, falls back to SAMPLE_QUESTIONS.
-    """
-    p = Path(path)
-    questions: List[dict] = []
-
-    if p.exists():
-        with p.open("r", encoding="utf-8") as f:
-            for lineno, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    if isinstance(obj, dict):
-                        questions.append(obj)
-                    else:
-                        print(f"[WARN] Line {lineno} is not a JSON object, skipping.")
-                except json.JSONDecodeError as e:
-                    print(f"[WARN] Invalid JSON on line {lineno}: {e}. Skipping line.")
-    else:
-        print(f"[WARN] Question file not found: {path}")
-
-    if not questions:
-        print("[INFO] No valid questions loaded from file. Using built-in SAMPLE_QUESTIONS.")
-        questions = SAMPLE_QUESTIONS.copy()
-
-    return questions
-
-
-# ============================================================
 # Main evaluation loop
 # ============================================================
 def main():
-    hle_path = "hle_questions.jsonl"  # optional now; we fall back if broken/missing
-
-    questions = load_hle_questions(hle_path)
+    questions = SAMPLE_QUESTIONS
 
     # Vireon HLE configuration – good starting defaults
     cfg = VireonConfig(
@@ -99,7 +57,6 @@ def main():
     )
 
     # For CI and basic usage we use the internal dummy backend.
-    # Later you can swap this for a real backend factory (Grok, OpenAI).
     llm_call = dummy_llm_call
 
     engine = VireonHLEEngine(llm_call=llm_call, config=cfg)
