@@ -141,10 +141,6 @@ Roadmap
 
 ---
 
-After this, if you want one more “polish” step, you can:
-
-- Go to repo **Settings → About** and set the short description to:
-
 > `Backend-agnostic Vireon reasoning wrapper for Humanity’s Last Exam and other hard AI benchmarks.`
 
 # Vireon HLE Engine
@@ -222,3 +218,9 @@ Given a JSONL file of exam questions like:
    "Number operator"
  ],
  "answer": "B"}
+
+## Configure a backend
+
+For full environment variable examples, see [ENVIRONMENT.md](ENVIRONMENT.md).
+
+Choose a provider via the `VIREON_BACKEND` env var.
