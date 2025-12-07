@@ -1,6 +1,6 @@
-openai>=1.30.0
+# Core dependency: OpenAI client (also used for xAI Grok via OpenAI-compatible API)
+openai>=1.55.0
 
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-
-pip install -r requirements.txt
+# Optional but useful for future metrics / calibration experiments
+numpy>=1.26.0
+scikit-learn>=1.5.0
