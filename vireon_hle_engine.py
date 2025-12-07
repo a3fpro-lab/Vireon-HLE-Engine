@@ -1,351 +1,155 @@
-"""
-vireon_hle_engine.py
+# run_hle_eval.py
 
-Humanity's Last Exam (HLE) answer engine using VIREON logic:
+import json
+from pathlib import Path
+from typing import List, Optional
 
-V = Verification-weighted
-I = Information-conscious
-R = Recursive reasoning (multi-path)
-E = Entropy-aware (disagreement as entropy)
-O = Outcome-calibrated (confidence scoring)
-N = Null/abstain-capable
-
-You must plug in your own LLM backend as `llm_call` (see llm_backends.py).
-"""
-
-from __future__ import annotations
-from dataclasses import dataclass
-from typing import List, Optional, Callable, Dict, Any, Tuple
-import math
-import time
-import statistics
+from vireon_hle_engine import VireonHLEEngine, VireonConfig
+from llm_backends import get_llm_call
 
 
-# LLM function type: (system_prompt, user_prompt, temperature) -> response_text
-LLMFn = Callable[[str, str, float], str]
+# ============================================================
+# Built-in sample questions (fallback if JSONL is missing/broken)
+# ============================================================
+SAMPLE_QUESTIONS: List[dict] = [
+    {
+        "id": 1,
+        "question": "In quantum mechanics, which operator corresponds to the observable of energy?",
+        "options": [
+            "Position operator",
+            "Hamiltonian operator",
+            "Momentum operator",
+            "Angular momentum operator",
+            "Number operator",
+        ],
+        "answer": "B",
+    }
+]
 
 
-@dataclass
-class VireonConfig:
-    # number of independent reasoning paths
-    n_paths: int = 5
-
-    # temperature for reasoning diversity
-    temperature: float = 0.7
-
-    # follow-up verification passes per top candidate
-    n_verifications: int = 2
-
-    # weight on "information cost" in TRP-like score
-    trp_lambda: float = 0.1
-
-    # minimum confidence to give a non-null answer
-    min_confidence: float = 0.55
-
-    # allowed answer characters for multiple choice
-    mc_options: str = "ABCDE"
-
-
-@dataclass
-class ReasoningPath:
-    raw_text: str
-    answer: Optional[str]
-    steps: int
-    info_cost: float
-    verification_score: float
-
-
-@dataclass
-class VireonResult:
-    final_answer: Optional[str]  # None => abstain / IDK
-    confidence: float
-    reason: str
-    paths: List[ReasoningPath]
-    extra: Dict[str, Any]
-
-
-# ----------------------------
-# Utils
-# ----------------------------
-
-def _extract_answer_token(text: str, mc_options: str) -> Optional[str]:
+# ============================================================
+# Load HLE questions (jsonl format, one JSON per line)
+# ============================================================
+def load_hle_questions(path: str) -> List[dict]:
     """
-    Heuristic: look for lines like 'Answer: X' or a single letter at end.
+    Load questions from a JSONL file.
+
+    - Each line must be a valid JSON object.
+    - Invalid lines are skipped with a warning.
+    - If nothing valid is found, falls back to SAMPLE_QUESTIONS.
     """
-    lower = text.lower()
-    # Try explicit "answer:" pattern
-    for tag in ["answer:", "final answer:", "final:", "choice:"]:
-        if tag in lower:
-            seg = lower.split(tag, 1)[1].strip()
-            if seg:
-                c = seg[0].upper()
-                if c in mc_options:
-                    return c
+    p = Path(path)
+    questions: List[dict] = []
 
-    # Fallback: last uppercase letter among options
-    for ch in reversed(text.strip()):
-        c = ch.upper()
-        if c in mc_options:
-            return c
+    if p.exists():
+        with p.open("r", encoding="utf-8") as f:
+            for lineno, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    if isinstance(obj, dict):
+                        questions.append(obj)
+                    else:
+                        print(f"[WARN] Line {lineno} is not a JSON object, skipping.")
+                except json.JSONDecodeError as e:
+                    print(f"[WARN] Invalid JSON on line {lineno}: {e}. Skipping line.")
+    else:
+        print(f"[WARN] Question file not found: {path}")
 
-    return None
+    if not questions:
+        print("[INFO] No valid questions loaded from file. Using built-in SAMPLE_QUESTIONS.")
+        questions = SAMPLE_QUESTIONS.copy()
 
-
-def _count_steps(text: str) -> int:
-    """
-    Crude proxy for steps: number of non-trivial fragments.
-    """
-    fragments = []
-    for part in text.replace("\n", ".").split("."):
-        s = part.strip()
-        if len(s) > 3:
-            fragments.append(s)
-    return max(1, len(fragments))
+    return questions
 
 
-def _verification_prompt(question: str, options: Optional[List[str]], answer: str) -> str:
-    """
-    Ask the model to check a proposed answer, not re-solve from scratch.
-    """
-    opt_str = ""
-    if options:
-        letters = "ABCDE"
-        mapped = [f"{letters[i]}. {opt}" for i, opt in enumerate(options)]
-        opt_str = "\nOptions:\n" + "\n".join(mapped)
+# ============================================================
+# Main evaluation loop
+# ============================================================
+def main():
+    hle_path = "hle_questions.jsonl"  # optional now; we fall back if broken/missing
 
-    return (
-        "You are a strict verifier. You are given an exam question, its options, "
-        "and a proposed answer (letter). Your job is ONLY to check if the letter "
-        "is correct, NOT to come up with a new answer.\n\n"
-        f"Question:\n{question}\n"
-        f"{opt_str}\n\n"
-        f"Proposed answer: {answer}\n\n"
-        "Respond ONLY with one of:\n"
-        "- CORRECT\n"
-        "- INCORRECT\n"
-        "- INSUFFICIENT_INFO\n"
+    questions = load_hle_questions(hle_path)
+
+    # Vireon HLE configuration – good starting defaults
+    cfg = VireonConfig(
+        n_paths=6,
+        temperature=0.6,
+        n_verifications=3,
+        trp_lambda=0.12,
+        min_confidence=0.60,
+        mc_options="ABCDE",
     )
 
+    llm_call = get_llm_call()
+    engine = VireonHLEEngine(llm_call=llm_call, config=cfg)
 
-def _verification_score_from_responses(responses: List[str]) -> float:
-    """
-    Map verifier responses to a [0,1] score.
-    """
-    if not responses:
-        return 0.0
+    total = correct = abstain = 0
+    confidences: List[float] = []
+    conf_correct: List[float] = []
+    conf_incorrect: List[float] = []
 
-    score = 0.0
-    for r in responses:
-        r_low = r.strip().upper()
-        if "CORRECT" in r_low and "INCORRECT" not in r_low:
-            score += 1.0
-        elif "INCORRECT" in r_low and "CORRECT" not in r_low:
-            score -= 1.0
-        # INSUFFICIENT_INFO => 0
+    print(f"Loaded {len(questions)} questions. Starting Vireon HLE evaluation...\n")
 
-    n = len(responses)
-    # Range [-n, n] → shift+scale into [0,1]
-    return max(0.0, min(1.0, 0.5 + 0.5 * (score / n)))
+    for q in questions:
+        qtext: str = q["question"]
+        options: Optional[List[str]] = q.get("options")
+        gold: Optional[str] = q.get("answer")  # may be None if you only want preds
 
-
-# ----------------------------
-# Core engine
-# ----------------------------
-
-class VireonHLEEngine:
-    def __init__(self, llm_call: LLMFn, config: Optional[VireonConfig] = None):
-        self.llm_call = llm_call
-        self.cfg = config or VireonConfig()
-
-    def answer_question(
-        self,
-        question: str,
-        options: Optional[List[str]] = None,
-    ) -> VireonResult:
-        """
-        Given an HLE-style question (+ optional options),
-        return a VireonResult:
-        - final answer letter or None if abstain
-        - confidence in [0,1]
-        - diagnostics (reason, path stats)
-        """
-        start_time = time.time()
-
-        paths = self._generate_paths(question, options)
-        self._run_verification(question, options, paths)
-
-        final_answer, confidence, reason, extra = self._aggregate_paths(paths)
-
-        total_time = time.time() - start_time
-        extra["total_time_sec"] = total_time
-
-        if confidence < self.cfg.min_confidence:
-            return VireonResult(
-                final_answer=None,
-                confidence=confidence,
-                reason=f"Abstain: confidence {confidence:.3f} < threshold {self.cfg.min_confidence:.3f}",
-                paths=paths,
-                extra=extra,
-            )
-
-        return VireonResult(
-            final_answer=final_answer,
-            confidence=confidence,
-            reason=reason,
-            paths=paths,
-            extra=extra,
-        )
-
-    # ------------------------
-    # Internal stages
-    # ------------------------
-
-    def _reasoning_prompt(self, question: str, options: Optional[List[str]]) -> str:
-        """
-        Prompt for a single reasoning path. Enforces explicit 'Answer: X'.
-        """
-        opt_str = ""
+        total += 1
+        print(f"\n=== Question {q.get('id', total)} ===")
+        print(qtext)
         if options:
-            letters = "ABCDE"
-            mapped = [f"{letters[i]}. {opt}" for i, opt in enumerate(options)]
-            opt_str = "\nOptions (choose one):\n" + "\n".join(mapped)
+            letters = cfg.mc_options
+            for i, opt in enumerate(options):
+                if i < len(letters):
+                    print(f"  {letters[i]}. {opt}")
 
-        return (
-            "You are taking a very difficult exam (Humanity's Last Exam).\n"
-            "Think step by step, but keep the solution reasonably concise.\n"
-            "At the end, output your FINAL CHOICE as a single letter from the options.\n\n"
-            f"Question:\n{question}\n"
-            f"{opt_str}\n\n"
-            "Show your reasoning, then end with a line of the form:\n"
-            "Answer: X\n"
-        )
+        result = engine.answer_question(qtext, options)
 
-    def _generate_paths(
-        self,
-        question: str,
-        options: Optional[List[str]],
-    ) -> List[ReasoningPath]:
-        paths: List[ReasoningPath] = []
-        system_prompt = (
-            "You are a careful, technical problem-solver trained to solve "
-            "PhD-level questions. Avoid guessing; reason explicitly."
-        )
+        print("Vireon answer:", result.final_answer or "ABSTAIN")
+        print("Confidence:", f"{result.confidence:.4f}")
+        print("Reason:", result.reason[:500] + ("..." if len(result.reason) > 500 else ""))
 
-        for i in range(self.cfg.n_paths):
-            user_prompt = self._reasoning_prompt(question, options)
-            # Stagger temperatures for diversity
-            temp = max(0.1, min(1.0, self.cfg.temperature + (i - self.cfg.n_paths / 2) * 0.1))
+        if result.final_answer is None:
+            abstain += 1
+            continue
 
-            t0 = time.time()
-            raw = self.llm_call(system_prompt, user_prompt, temp)
-            dt = time.time() - t0
+        confidences.append(result.confidence)
 
-            ans = _extract_answer_token(raw, self.cfg.mc_options)
-            steps = _count_steps(raw)
-            info_cost = math.log(1.0 + steps) + dt  # simple "effort" proxy
-
-            paths.append(
-                ReasoningPath(
-                    raw_text=raw,
-                    answer=ans,
-                    steps=steps,
-                    info_cost=info_cost,
-                    verification_score=0.0,
-                )
-            )
-
-        return paths
-
-    def _run_verification(
-        self,
-        question: str,
-        options: Optional[List[str]],
-        paths: List[ReasoningPath],
-    ) -> None:
-        """
-        V = Verification-weighted: for each path with an answer,
-        run an independent verifier a few times.
-        """
-        system_prompt = (
-            "You are a strict, unemotional checker. You do not change answers; "
-            "you only evaluate if a proposed letter is correct."
-        )
-        for p in paths:
-            if p.answer is None:
-                p.verification_score = 0.0
-                continue
-
-            ver_responses: List[str] = []
-            for _ in range(self.cfg.n_verifications):
-                v_prompt = _verification_prompt(question, options, p.answer)
-                r = self.llm_call(system_prompt, v_prompt, 0.1)
-                ver_responses.append(r)
-
-            p.verification_score = _verification_score_from_responses(ver_responses)
-
-    def _aggregate_paths(
-        self,
-        paths: List[ReasoningPath],
-    ) -> Tuple[Optional[str], float, str, Dict[str, Any]]:
-        """
-        E + O + N + TRP:
-        - group by answer
-        - compute stability, verification, and TRP-style score
-        """
-        buckets: Dict[str, List[ReasoningPath]] = {}
-        for p in paths:
-            if p.answer is None:
-                continue
-            buckets.setdefault(p.answer, []).append(p)
-
-        if not buckets:
-            return None, 0.0, "No valid answers extracted from any path.", {}
-
-        candidate_scores: Dict[str, float] = {}
-        candidate_details: Dict[str, Dict[str, Any]] = {}
-
-        total_paths = sum(len(v) for v in buckets.values())
-
-        for ans, plist in buckets.items():
-            k = len(plist)
-            frac = k / total_paths
-
-            ver_avg = statistics.mean(p.verification_score for p in plist)
-            info_avg = statistics.mean(p.info_cost for p in plist)
-
-            correctness_proxy = ver_avg
-            trp_score = (correctness_proxy * frac) / (info_avg + self.cfg.trp_lambda)
-
-            candidate_scores[ans] = trp_score
-            candidate_details[ans] = {
-                "paths": k,
-                "frac": frac,
-                "verification_avg": ver_avg,
-                "info_cost_avg": info_avg,
-                "trp_score": trp_score,
-            }
-
-        best_ans = max(candidate_scores, key=candidate_scores.get)
-        best_score = candidate_scores[best_ans]
-
-        scores = list(candidate_scores.values())
-        if len(scores) == 1:
-            confidence = min(1.0, max(0.0, 0.5 + best_score))
-        else:
-            s_min, s_max = min(scores), max(scores)
-            if s_max == s_min:
-                confidence = 0.5
+        if gold is not None:
+            if result.final_answer == gold:
+                correct += 1
+                conf_correct.append(result.confidence)
             else:
-                confidence = (best_score - s_min) / (s_max - s_min)
+                conf_incorrect.append(result.confidence)
 
-        reason = (
-            f"Selected answer {best_ans} with TRP-style score {best_score:.4g}, "
-            f"confidence {confidence:.3f}. Buckets: {candidate_details}"
-        )
+    # =================== Summary metrics ======================
+    print("\n" + "=" * 50)
+    print("                FINAL RESULTS")
+    print("=" * 50)
+    print(f"Total questions          : {total}")
+    print(f"Answered                 : {total - abstain}")
+    print(f"Abstained                : {abstain}")
 
-        extra = {
-            "candidate_details": candidate_details,
-            "candidate_scores": candidate_scores,
-        }
+    acc_overall = correct / total if total > 0 else 0.0
+    answered = total - abstain
+    acc_conditional = correct / answered if answered > 0 else 0.0
 
-        return best_ans, confidence, reason, extra
+    print(f"Accuracy (overall)       : {acc_overall:.4f}")
+    print(f"Accuracy (when answered) : {acc_conditional:.4f}")
+
+    if confidences:
+        avg_conf = sum(confidences) / len(confidences)
+        avg_conf_cor = sum(conf_correct) / len(conf_correct) if conf_correct else 0.0
+        avg_conf_inc = sum(conf_incorrect) / len(conf_incorrect) if conf_incorrect else 0.0
+
+        print(f"Avg confidence (answered): {avg_conf:.4f}")
+        print(f"Avg confidence (correct) : {avg_conf_cor:.4f}")
+        print(f"Avg confidence (wrong)   : {avg_conf_inc:.4f}")
+
+
+if __name__ == "__main__":
+    main()
