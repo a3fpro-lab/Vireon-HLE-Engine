@@ -1,3 +1,1 @@
 {"id": 1, "question": "In quantum mechanics, which operator corresponds to the observable of energy?", "options": ["Position operator", "Hamiltonian operator", "Momentum operator", "Angular momentum operator", "Number operator"], "answer": "B"}
-{"id": 2, "question": "Which vitamin is primarily responsible for blood clotting?", "options": ["Vitamin A", "Vitamin B12", "Vitamin C", "Vitamin K", "Vitamin D"], "answer": "D"}
-{"id": 3, "question": "Which data structure is most appropriate for implementing a First-In, First-Out (FIFO) queue?", "options": ["Stack", "Binary search tree", "Queue", "Priority queue", "Hash table"], "answer": "C"}
