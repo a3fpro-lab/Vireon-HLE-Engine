@@ -1,43 +1,82 @@
 #!/usr/bin/env python
 """
-Vireon-HLE Engine — minimal stable runner.
+Vireon-HLE Engine — robust runner v0.2
 
-This is a clean reset stub:
-- No external files
-- No JSON loading
-- Always exits successfully with a simple metrics JSON
+Behavior:
+- Tries to load an HLE dataset (JSON/JSONL).
+- If present, runs dataset-level evaluation via hle_engine.
+- If missing or invalid, falls back to a minimal stub,
+  but never crashes (exit code 0).
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, List
+
+from hle_data import load_hle_questions
+from hle_engine import run_dataset_eval
+
+
+DEFAULT_DATA_CANDIDATES: List[str] = [
+    "data/hle_questions.jsonl",
+    "data/hle_questions.json",
+    "data/hle_questions.example.jsonl",
+]
+
+
+def _find_default_dataset() -> Path | None:
+    for name in DEFAULT_DATA_CANDIDATES:
+        p = Path(name)
+        if p.is_file():
+            return p
+    return None
+
+
+def _stub_metrics(note: str, error: str | None = None) -> Dict[str, Any]:
+    base: Dict[str, Any] = {
+        "engine": "Vireon-HLE",
+        "version": "0.2.0",
+        "num_questions": 0,
+        "accuracy": 0.0,
+        "status": "no_data",
+        "notes": note,
+    }
+    if error is not None:
+        base["error"] = error
+    return base
 
 
 def run_hle_eval() -> Dict[str, Any]:
-    """
-    Minimal placeholder evaluation.
+    dataset_path = _find_default_dataset()
+    if dataset_path is None:
+        return _stub_metrics(
+            "No HLE dataset found. Place a JSON/JSONL file in data/ to enable full eval."
+        )
 
-    Later we can:
-    - Load real HLE questions
-    - Call the actual Vireon-HLE engine
-    - Compute real metrics
+    try:
+        questions = load_hle_questions(dataset_path)
+        stats = run_dataset_eval(questions)
+    except Exception as e:
+        return _stub_metrics(
+            f"Failed to load or evaluate HLE dataset at {dataset_path}.", error=str(e)
+        )
 
-    For now, we just prove the pipeline runs cleanly.
-    """
-    return {
+    # For now, we don't have model responses, so 'accuracy' is a placeholder.
+    metrics: Dict[str, Any] = {
         "engine": "Vireon-HLE",
-        "version": "0.0.1-reset",
-        "num_questions": 0,
-        "accuracy": 0.0,
+        "version": "0.2.0",
         "status": "ok",
-        "notes": "Minimal stub: no questions loaded, no eval performed.",
+        "notes": f"Dataset-level stats for {dataset_path}",
+        "accuracy": 0.0,
     }
+    metrics.update(stats)
+    return metrics
 
 
 def main() -> None:
     metrics = run_hle_eval()
-    # Stable, machine-readable output for CI or scripts
     print(json.dumps(metrics, indent=2, sort_keys=True))
 
 
