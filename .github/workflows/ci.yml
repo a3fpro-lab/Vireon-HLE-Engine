@@ -37,8 +37,6 @@ jobs:
           if [ -d tests ]; then
             echo "Running pytest..."
             pytest -q
-          else:
-            echo "No tests/ directory, skipping pytest."
           fi
 
       - name: Run Vireon HLE eval
