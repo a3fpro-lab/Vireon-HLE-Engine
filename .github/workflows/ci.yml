@@ -9,7 +9,7 @@ on:
   pull_request:
 
 jobs:
-  test:
+  test-and-eval:
     runs-on: ubuntu-latest
 
     steps:
@@ -29,7 +29,7 @@ jobs:
           elif [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
-          # Make sure pytest is available even if not in requirements yet
+          # Ensure pytest is available
           pip install pytest
 
       - name: Run pytest (if tests exist)
@@ -37,11 +37,11 @@ jobs:
           if [ -d tests ]; then
             echo "Running pytest..."
             pytest -q
-          else
+          else:
             echo "No tests/ directory, skipping pytest."
           fi
 
-      - name: Run HLE eval stub
+      - name: Run Vireon HLE eval
         run: |
-          echo "Running Vireon HLE eval stub..."
+          echo "Running Vireon HLE eval..."
           python run_hle_eval.py
