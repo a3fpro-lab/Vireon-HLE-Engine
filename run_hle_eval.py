@@ -1,48 +1,31 @@
-import json
-from pathlib import Path
-from typing import Any, Dict, List
-
-
-def load_hle_questions(path: str | Path) -> List[Dict[str, Any]]:
-    """
-    Load HLE questions from a JSONL or JSON file.
-
-    - Ignores blank lines and lines starting with '#'
-    - Raises a clear error showing the offending line if JSON is invalid
-    """
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"HLE questions file not found: {path}")
-
-    questions: List[Dict[str, Any]] = []
-
-    with path.open("r", encoding="utf-8") as f:
-        for lineno, raw in enumerate(f, start=1):
-            line = raw.strip()
-            # Skip blanks / comments
-            if not line or line.startswith("#"):
-                continue
-
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError as e:
-                # Give a *very* explicit message so we can fix the data file quickly
-                msg = (
-                    f"Invalid JSON in {path} at line {lineno}: {e.msg} "
-                    f"(pos {e.pos}, col {e.colno})\n"
-                    f"Offending line:\n{raw}"
-                )
-                raise ValueError(msg) from e
-
-            if not isinstance(obj, dict):
-                raise ValueError(
-                    f"Expected JSON object on line {lineno} of {path}, "
-                    f"got {type(obj).__name__}"
-                )
-
-            questions.append(obj)
-
-    if not questions:
-        raise ValueError(f"No questions loaded from {path} (all blank/comment?)")
-
-    return questions
+Run python run_hle_eval.py
+  python run_hle_eval.py
+  shell: /usr/bin/bash -e {0}
+  env:
+    VIREON_BACKEND: dummy
+    pythonLocation: /opt/hostedtoolcache/Python/3.11.14/x64
+    PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.11.14/x64/lib/pkgconfig
+    Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.14/x64
+    Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.14/x64
+    Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.14/x64
+    LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.11.14/x64/lib
+Traceback (most recent call last):
+  File "/home/runner/work/Vireon-HLE-Engine/Vireon-HLE-Engine/run_hle_eval.py", line 118, in <module>
+    main()
+  File "/home/runner/work/Vireon-HLE-Engine/Vireon-HLE-Engine/run_hle_eval.py", line 37, in main
+    questions = load_hle_questions(hle_path)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/Vireon-HLE-Engine/Vireon-HLE-Engine/run_hle_eval.py", line 21, in load_hle_questions
+    data.append(json.loads(line))
+                ^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.14/x64/lib/python3.11/json/__init__.py", line 346, in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.14/x64/lib/python3.11/json/decoder.py", line 337, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.14/x64/lib/python3.11/json/decoder.py", line 353, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ^^^^^^^^^^^^^^^^^^^^^^
+json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 10 (char 9)
+Error: Process completed with exit code 1.
