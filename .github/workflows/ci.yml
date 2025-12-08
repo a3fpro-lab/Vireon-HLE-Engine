@@ -1,17 +1,16 @@
-name: CI
+name: Vireon HLE CI
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
+      - "feature/**"
+      - "dev/**"
   pull_request:
-    branches: [ main ]
 
 jobs:
   test:
     runs-on: ubuntu-latest
-
-    env:
-      VIREON_BACKEND: dummy
 
     steps:
       - name: Checkout repo
@@ -25,8 +24,24 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then
+            pip install -r requirements-dev.txt
+          elif [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          # Make sure pytest is available even if not in requirements yet
+          pip install pytest
 
-      - name: Smoke test Vireon HLE Engine
+      - name: Run pytest (if tests exist)
         run: |
+          if [ -d tests ]; then
+            echo "Running pytest..."
+            pytest -q
+          else
+            echo "No tests/ directory, skipping pytest."
+          fi
+
+      - name: Run HLE eval stub
+        run: |
+          echo "Running Vireon HLE eval stub..."
           python run_hle_eval.py
