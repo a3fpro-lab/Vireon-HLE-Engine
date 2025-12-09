@@ -1,162 +1,194 @@
+# hle_scoring.py
+# Simple scoring utilities for HLE-style results.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List
-
-from hle_schema import HLEQuestion
+from typing import Any, Dict, Iterable, List, Tuple
 
 
-@dataclass
-class HLEResult:
-    """Tagged behavior outcome for a single question + model response."""
-    id: str
-    question_id: str
-    model: str
-    response: str
-    tags_present: List[str] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+def load_hle_results(path: str | Path) -> Dict[str, Dict[str, Any]]:
+    """
+    Load model results from a JSON or JSONL file.
 
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "HLEResult":
-        if not isinstance(data, dict):
-            raise TypeError(f"HLEResult.from_dict expected dict, got {type(data).__name__}")
+    We try to be forgiving:
+    - Accept JSONL (one JSON object per line)
+    - Or a single JSON array of objects
+    - Ignore blank lines
 
+    Each row is expected to have some kind of question identifier:
+    one of: 'question_id', 'id', 'qid', or 'index'.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Results file not found: {path}")
+
+    text = path.read_text(encoding="utf-8")
+    stripped = text.lstrip()
+
+    # Decide whether this is JSONL or a JSON array
+    if stripped.startswith("["):
         try:
-            rid = data["id"]
-            qid = data["question_id"]
-            model = data["model"]
-            response = data["response"]
-        except KeyError as e:
-            raise KeyError(f"Missing required field in HLEResult: {e.args[0]}") from e
+            items = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Failed to parse results JSON array at {path}: {e}") from e
+    else:
+        items: List[Dict[str, Any]] = []
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                items.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"Failed to parse results JSONL line in {path!s}: {e}"
+                ) from e
 
-        if not isinstance(rid, str):
-            raise TypeError("id must be a string")
-        if not isinstance(qid, str):
-            raise TypeError("question_id must be a string")
-        if not isinstance(model, str):
-            raise TypeError("model must be a string")
-        if not isinstance(response, str):
-            raise TypeError("response must be a string")
+    data: Dict[str, Dict[str, Any]] = {}
+    for row in items:
+        qid = (
+            row.get("question_id")
+            or row.get("id")
+            or row.get("qid")
+            or row.get("index")
+        )
+        if qid is None:
+            raise KeyError(
+                "Result row missing question id field; expected one of "
+                "'question_id', 'id', 'qid', or 'index'. "
+                f"Row was: {row}"
+            )
+        data[str(qid)] = row
 
-        tags_present = data.get("tags_present", [])
-        if not isinstance(tags_present, list) or not all(isinstance(t, str) for t in tags_present):
-            raise TypeError("tags_present must be a list of strings")
+    return data
 
-        metadata = data.get("metadata") or {}
-        if not isinstance(metadata, dict):
-            raise TypeError("metadata must be an object if present")
 
-        return cls(
-            id=rid,
-            question_id=qid,
-            model=model,
-            response=response,
-            tags_present=list(tags_present),
-            metadata=dict(metadata),
+def _extract_correct_and_confidence(result: Dict[str, Any]) -> Tuple[bool, float]:
+    """
+    Extract (is_correct, confidence) from a single result row.
+
+    We support a few common field names so the runner can evolve
+    without breaking this module:
+      - correctness: 'is_correct' | 'correct' | 'score' (score>0.5)
+      - confidence: 'confidence' | 'prob' (else default 1.0)
+    """
+    # correctness
+    if "is_correct" in result:
+        correct = bool(result["is_correct"])
+    elif "correct" in result:
+        correct = bool(result["correct"])
+    elif "score" in result:
+        # Treat scores on [0,1] as probability-like
+        try:
+            correct = float(result["score"]) > 0.5
+        except (TypeError, ValueError):
+            correct = False
+    else:
+        raise KeyError(
+            "Result row missing correctness indicator; expected one of "
+            "'is_correct', 'correct', or 'score'. "
+            f"Row was: {result}"
         )
 
-
-def load_hle_results(path: str | Path) -> List[HLEResult]:
-    """Load HLEResult objects from a JSON or JSONL file."""
-    p = Path(path)
-    if not p.is_file():
-        raise FileNotFoundError(f"HLE results file not found: {p}")
-
-    text = p.read_text(encoding="utf-8").lstrip()
-    if not text:
-        raise ValueError(f"HLE results file is empty: {p}")
-
-    results: List[HLEResult] = []
-
-    if text[0] == "[":
+    # confidence
+    if "confidence" in result:
         try:
-            raw = json.loads(text)
-        except json.JSONDecodeError as e:
-            raise ValueError(
-                f"Invalid JSON array in {p}: {e.msg} (line {e.lineno}, col {e.colno})"
-            ) from e
-        if not isinstance(raw, list):
-            raise TypeError(f"Top-level JSON in {p} must be an array")
-        for obj in raw:
-            results.append(HLEResult.from_dict(obj))
-        return results
-
-    # JSONL
-    for lineno, raw_line in enumerate(text.splitlines(), start=1):
-        line = raw_line.strip()
-        if not line or line.startswith("#") or line.startswith("//"):
-            continue
+            conf = float(result["confidence"])
+        except (TypeError, ValueError):
+            conf = 1.0
+    elif "prob" in result:
         try:
-            obj = json.loads(line)
-        except json.JSONDecodeError as e:
-            raise ValueError(
-                f"Invalid JSON at {p}:{lineno}: {e.msg} (col {e.colno})\n"
-                f"Offending line:\n{raw_line}"
-            ) from e
-        try:
-            result = HLEResult.from_dict(obj)
-        except Exception as e:  # attach context
-            raise ValueError(f"Invalid HLEResult at {p}:{lineno}: {e}") from e
-        results.append(result)
+            conf = float(result["prob"])
+        except (TypeError, ValueError):
+            conf = 1.0
+    else:
+        # If we don't have an explicit confidence, assume fully confident.
+        conf = 1.0
 
-    if not results:
-        raise ValueError(f"No HLE results loaded from {p}")
+    # Clamp into [0,1] so calibration math behaves
+    if conf < 0.0:
+        conf = 0.0
+    elif conf > 1.0:
+        conf = 1.0
 
-    return results
+    return correct, conf
 
 
 def score_results(
-    questions: List[HLEQuestion],
-    results: List[HLEResult],
+    questions: Iterable[Dict[str, Any]],
+    results: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Any]:
     """
-    Compare expected behavior tags (must / must_not) with tags_present.
+    Compute simple accuracy and a basic Expected Calibration Error (ECE).
 
-    Returns dataset-level metrics:
-    - num_results
-    - num_questions_with_results
-    - avg_must_coverage
-    - num_questions_with_violations
-    - violation_rate
+    Parameters
+    ----------
+    questions:
+        Iterable of HLE question dicts. Each is expected to have some
+        identifier like 'question_id', 'id', 'qid', or 'index'.
+
+    results:
+        Mapping from question-id-as-string to model result dicts.
+
+    Returns
+    -------
+    A dict like:
+        {
+            "n": int,
+            "accuracy": float,
+            "ece": float,
+        }
     """
-    q_by_id: Dict[str, HLEQuestion] = {q.id: q for q in questions}
+    y_true: List[bool] = []
+    y_conf: List[float] = []
 
-    # Group results by question_id (first result per question for now)
-    seen_qids: Dict[str, HLEResult] = {}
-    for r in results:
-        if r.question_id in q_by_id and r.question_id not in seen_qids:
-            seen_qids[r.question_id] = r
+    for q in questions:
+        qid = (
+            q.get("question_id")
+            or q.get("id")
+            or q.get("qid")
+            or q.get("index")
+        )
+        if qid is None:
+            # Skip malformed question entries instead of crashing
+            continue
 
-    num_results = len(results)
-    num_q_with_results = len(seen_qids)
+        key = str(qid)
+        if key not in results:
+            # No prediction for this question → skip
+            continue
 
-    coverages: List[float] = []
-    violations = 0
+        correct, conf = _extract_correct_and_confidence(results[key])
+        y_true.append(correct)
+        y_conf.append(conf)
 
-    for qid, result in seen_qids.items():
-        q = q_by_id[qid]
-        must = set(q.evaluation.must)
-        must_not = set(q.evaluation.must_not)
-        present = set(result.tags_present)
+    n = len(y_true)
+    if n == 0:
+        return {"n": 0, "accuracy": 0.0, "ece": 0.0}
 
-        if must:
-            cov = len(must & present) / len(must)
-            coverages.append(cov)
+    # Accuracy
+    accuracy = sum(1 for v in y_true if v) / n
 
-        if must_not & present:
-            violations += 1
+    # Simple ECE with 10 uniform bins over [0,1]
+    num_bins = 10
+    bin_totals = [0] * num_bins
+    bin_correct = [0] * num_bins
 
-    avg_coverage = sum(coverages) / len(coverages) if coverages else 0.0
-    violation_rate = (
-        violations / num_q_with_results if num_q_with_results > 0 else 0.0
-    )
+    for truth, conf in zip(y_true, y_conf):
+        # conf in [0,1] → bin index 0..9
+        idx = int(conf * num_bins)
+        if idx == num_bins:
+            idx = num_bins - 1
+        bin_totals[idx] += 1
+        if truth:
+            bin_correct[idx] += 1
 
-    return {
-        "num_results": num_results,
-        "num_questions_with_results": num_q_with_results,
-        "avg_must_coverage": avg_coverage,
-        "num_questions_with_violations": violations,
-        "violation_rate": violation_rate,
-    }
+    ece = 0.0
+    for i in range(num_bins):
+        if bin_totals[i] == 0:
+            continue
+        acc_i = bin_correct[i] / bin_totals[i]
+        conf_i = (i + 0.5) / num_bins  # bin center
+        ece += abs(acc_i - conf_i) * (bin_totals[i] / n)
+
+    return {"n": n, "accuracy": accuracy, "ece": ece}
