@@ -1,4 +1,11 @@
+## Status
 
+- Version: v0.1.0-alpha
+- CI: ✅ (pytest + stub eval)
+- Eval: `run_hle_eval.py` currently runs a CI-safe stub:
+  - returns metrics with the correct *shape* (`accuracy`, `n`, `calibration_error`)
+  - does **not** yet run a full model or real HLE dataset
+- Roadmap: upgrade stub → full HLE scoring once questions/results are wired in.
 
 # Vireon HLE Engine
 
